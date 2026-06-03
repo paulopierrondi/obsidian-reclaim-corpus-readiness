@@ -1,0 +1,8 @@
+node_modules/
+*.log
+.DS_Store
+.env
+src/
+esbuild.config.mjs
+tsconfig.json
+package-lock.json
