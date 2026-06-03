@@ -26,6 +26,142 @@ module.exports = __toCommonJS(main_exports);
 var import_obsidian = require("obsidian");
 
 // src/scanner.ts
+var SHINGLE_SIZE = 8;
+var NUM_HASHES = 32;
+var LSH_BANDS = 8;
+var NEAR_DUP_THRESHOLD = 0.72;
+function fnv1a32(s) {
+  let hash = 2166136261;
+  for (let i = 0; i < s.length; i++) {
+    hash ^= s.charCodeAt(i);
+    hash = Math.imul(hash, 16777619);
+  }
+  return hash >>> 0;
+}
+function buildHashCoeffs(count) {
+  const coeffs = [];
+  let state = 88172645463325250;
+  for (let i = 0; i < count; i++) {
+    state ^= state << 13;
+    state ^= state >>> 7;
+    state ^= state << 17;
+    const a = state >>> 0 | 1;
+    state ^= state << 13;
+    state ^= state >>> 7;
+    state ^= state << 17;
+    const b = state >>> 0;
+    coeffs.push([a, b]);
+  }
+  return coeffs;
+}
+function tokenize(normalized) {
+  if (!normalized)
+    return [];
+  return normalized.split(/\s+/).filter((w) => w.length > 0);
+}
+function shingleSet(tokens, size) {
+  const set = /* @__PURE__ */ new Set();
+  if (tokens.length === 0)
+    return set;
+  if (tokens.length < size) {
+    set.add(tokens.join(" "));
+    return set;
+  }
+  for (let i = 0; i + size <= tokens.length; i++) {
+    set.add(tokens.slice(i, i + size).join(" "));
+  }
+  return set;
+}
+function minhashSignature(shingles, coeffs) {
+  const sig = new Array(coeffs.length).fill(4294967295);
+  for (const shingle of shingles) {
+    const base = fnv1a32(shingle);
+    for (let i = 0; i < coeffs.length; i++) {
+      const [a, b] = coeffs[i];
+      const h = Math.imul(base, a) + b;
+      const uh = h >>> 0;
+      if (uh < sig[i])
+        sig[i] = uh;
+    }
+  }
+  return sig;
+}
+function estimateJaccard(a, b) {
+  if (a.length === 0 || a.length !== b.length)
+    return 0;
+  let equal = 0;
+  for (let i = 0; i < a.length; i++) {
+    if (a[i] === b[i])
+      equal++;
+  }
+  return equal / a.length;
+}
+function findNearDuplicates(docs) {
+  const withSigs = docs.filter((d) => d.signature !== null && !d.isEmpty);
+  if (withSigs.length < 2)
+    return [];
+  const coeffs = buildHashCoeffs(NUM_HASHES);
+  const signatures = [];
+  for (const d of withSigs) {
+    const tokens = tokenize(d.body.replace(/\s+/g, " ").trim().toLowerCase());
+    const shingles = shingleSet(tokens, SHINGLE_SIZE);
+    if (shingles.size === 0) {
+      signatures.push([]);
+    } else {
+      signatures.push(minhashSignature(shingles, coeffs));
+    }
+  }
+  const rows = Math.max(1, Math.floor(NUM_HASHES / LSH_BANDS));
+  const buckets = /* @__PURE__ */ new Map();
+  for (let di = 0; di < withSigs.length; di++) {
+    const sig = signatures[di];
+    if (sig.length === 0)
+      continue;
+    for (let band = 0; band < LSH_BANDS; band++) {
+      const start = band * rows;
+      if (start >= sig.length)
+        break;
+      const slice = sig.slice(start, Math.min(start + rows, sig.length)).join(",");
+      const key = `${band}:${slice}`;
+      const arr = buckets.get(key) || [];
+      arr.push(di);
+      buckets.set(key, arr);
+    }
+  }
+  const candidatePairs = /* @__PURE__ */ new Set();
+  for (const [, idxs] of buckets) {
+    if (idxs.length < 2)
+      continue;
+    for (let i = 0; i < idxs.length; i++) {
+      for (let j = i + 1; j < idxs.length; j++) {
+        const a = Math.min(idxs[i], idxs[j]);
+        const b = Math.max(idxs[i], idxs[j]);
+        candidatePairs.add(`${a}|${b}`);
+      }
+    }
+  }
+  const near = [];
+  for (const key of candidatePairs) {
+    const [aiStr, biStr] = key.split("|");
+    const ai = parseInt(aiStr, 10);
+    const bi = parseInt(biStr, 10);
+    const docA = withSigs[ai];
+    const docB = withSigs[bi];
+    if (!docA || !docB)
+      continue;
+    if (docA.hash === docB.hash)
+      continue;
+    const sigA = signatures[ai];
+    const sigB = signatures[bi];
+    if (sigA.length === 0 || sigB.length === 0)
+      continue;
+    const sim = estimateJaccard(sigA, sigB);
+    if (sim >= NEAR_DUP_THRESHOLD) {
+      near.push({ similarity: Math.round(sim * 100), a: docA.path, b: docB.path });
+    }
+  }
+  return near.sort((a, b) => b.similarity - a.similarity);
+}
 function sha256Hex(input) {
   let hash = 0;
   for (let i = 0; i < input.length; i++) {
@@ -54,6 +190,58 @@ function looksUntitled(name) {
 function isStale(mtime) {
   return Date.now() - mtime > 365 * 24 * 60 * 60 * 1e3;
 }
+function exportMarkdownReport(result, vaultName) {
+  const now = new Date().toISOString();
+  const lines = [];
+  lines.push("# RECLAIM Corpus Readiness Audit");
+  lines.push("");
+  lines.push(`- **Vault:** ${vaultName}`);
+  lines.push(`- **Generated:** ${now}`);
+  lines.push(`- **Score:** ${result.score}/100`);
+  lines.push(`- **Grade:** ${result.grade}`);
+  lines.push("");
+  lines.push("## Dimensions");
+  lines.push("");
+  lines.push("| Dimension | Status |");
+  lines.push("|---|---|");
+  lines.push(`| Documents | ${result.documents} |`);
+  lines.push(`| Empty | ${result.emptyCount} |`);
+  lines.push(`| Thin | ${result.thinCount} |`);
+  lines.push(`| No frontmatter | ${result.noFrontmatterCount} |`);
+  lines.push(`| Weak titles | ${result.weakTitleCount} |`);
+  lines.push(`| Stale | ${result.staleCount} |`);
+  lines.push(`| Exact duplicate groups | ${result.duplicateGroups.length} |`);
+  lines.push(`| Near-duplicate pairs | ${result.nearDuplicates.length} |`);
+  lines.push(`| Basename conflicts | ${result.conflictCount} |`);
+  lines.push("");
+  if (result.duplicateGroups.length > 0) {
+    lines.push("## Exact Duplicates");
+    lines.push("");
+    for (const g of result.duplicateGroups) {
+      lines.push(`- **${g.count} files:** ${g.files.join(", ")}`);
+    }
+    lines.push("");
+  }
+  if (result.nearDuplicates.length > 0) {
+    lines.push("## Near Duplicates");
+    lines.push("");
+    for (const nd of result.nearDuplicates.slice(0, 50)) {
+      lines.push(`- **${nd.similarity}%** \xB7 \`${nd.a}\` \u2194 \`${nd.b}\``);
+    }
+    if (result.nearDuplicates.length > 50) {
+      lines.push(`- *\u2026 and ${result.nearDuplicates.length - 50} more*`);
+    }
+    lines.push("");
+  }
+  if (result.conflictCount > 0) {
+    lines.push("## Basename Conflicts");
+    lines.push(`\`${result.conflictCount}\` titles appear with different content.`);
+    lines.push("");
+  }
+  lines.push("---");
+  lines.push("*Generated by RECLAIM Corpus Readiness plugin*");
+  return lines.join("\n");
+}
 async function scanVault(vault) {
   var _a;
   const files = vault.getMarkdownFiles();
@@ -65,6 +253,9 @@ async function scanVault(vault) {
     const bytes = new Blob([content]).size;
     const stat = await vault.adapter.stat(file.path);
     const mtime = (_a = stat == null ? void 0 : stat.mtime) != null ? _a : Date.now();
+    const tokens = tokenize(normalized);
+    const shingles = shingleSet(tokens, SHINGLE_SIZE);
+    const signature = shingles.size > 0 ? minhashSignature(shingles, buildHashCoeffs(NUM_HASHES)) : null;
     docs.push({
       path: file.path,
       name: file.name,
@@ -77,7 +268,8 @@ async function scanVault(vault) {
       isThin: normalized.length > 0 && normalized.length < 200,
       isStale: isStale(mtime),
       weakTitle: looksUntitled(file.name),
-      hash: sha256Hex(normalized)
+      hash: sha256Hex(normalized),
+      signature
     });
   }
   const hashMap = /* @__PURE__ */ new Map();
@@ -103,6 +295,7 @@ async function scanVault(vault) {
     if (unique.size > 1)
       conflictCount++;
   }
+  const nearDuplicates = findNearDuplicates(docs);
   const emptyCount = docs.filter((d) => d.isEmpty).length;
   const thinCount = docs.filter((d) => d.isThin).length;
   const noFrontmatterCount = docs.filter((d) => !d.hasFrontmatter).length;
@@ -111,7 +304,7 @@ async function scanVault(vault) {
   const total = Math.max(1, docs.length);
   const exactDupFiles = duplicateGroups.reduce((sum, g) => sum + g.count, 0);
   const exactDupRedundant = exactDupFiles - duplicateGroups.length;
-  const uniqueness = Math.max(0, 100 - exactDupRedundant / total * 100);
+  const uniqueness = Math.max(0, 100 - exactDupRedundant / total * 100 - nearDuplicates.length / Math.max(1, total * 0.5) * 20);
   const structure = Math.max(0, 100 - noFrontmatterCount / total * 40);
   const density = Math.max(0, 100 - thinCount / total * 60 - emptyCount / total * 80);
   const titleQuality = Math.max(0, 100 - weakTitleCount / total * 40);
@@ -132,6 +325,7 @@ async function scanVault(vault) {
     thinCount,
     noFrontmatterCount,
     duplicateGroups,
+    nearDuplicates,
     conflictCount,
     staleCount,
     weakTitleCount,
@@ -168,6 +362,11 @@ var ReclaimPlugin = class extends import_obsidian.Plugin {
       name: "Open readiness panel",
       callback: async () => await this.openReadinessView()
     });
+    this.addCommand({
+      id: "export-readiness-report",
+      name: "Export readiness report (Markdown)",
+      callback: async () => await this.exportReport()
+    });
     if (this.settings.showStatusBar) {
       this.statusBarItem = this.addStatusBarItem();
       this.statusBarItem.setText("RECLAIM \u2014");
@@ -182,6 +381,18 @@ var ReclaimPlugin = class extends import_obsidian.Plugin {
     let debounceTimer;
     this.registerEvent(
       this.app.vault.on("modify", () => {
+        window.clearTimeout(debounceTimer);
+        debounceTimer = window.setTimeout(() => this.runScan(), 5e3);
+      })
+    );
+    this.registerEvent(
+      this.app.vault.on("create", () => {
+        window.clearTimeout(debounceTimer);
+        debounceTimer = window.setTimeout(() => this.runScan(), 5e3);
+      })
+    );
+    this.registerEvent(
+      this.app.vault.on("delete", () => {
         window.clearTimeout(debounceTimer);
         debounceTimer = window.setTimeout(() => this.runScan(), 5e3);
       })
@@ -229,6 +440,17 @@ var ReclaimPlugin = class extends import_obsidian.Plugin {
       view.update(this.lastResult);
     }
   }
+  async exportReport() {
+    if (!this.lastResult) {
+      new import_obsidian.Notice("RECLAIM: Run a scan first before exporting.", 3e3);
+      return;
+    }
+    const vaultName = this.app.vault.getName();
+    const markdown = exportMarkdownReport(this.lastResult, vaultName);
+    const fileName = `RECLAIM-Audit-${new Date().toISOString().slice(0, 10)}.md`;
+    await this.app.vault.create(fileName, markdown);
+    new import_obsidian.Notice(`RECLAIM: Report exported to ${fileName}`, 4e3);
+  }
 };
 var ReclaimReadinessView = class extends import_obsidian.ItemView {
   constructor(leaf, plugin) {
@@ -267,6 +489,7 @@ var ReclaimReadinessView = class extends import_obsidian.ItemView {
       { label: "Stale", value: r.staleCount },
       { label: "Weak titles", value: r.weakTitleCount },
       { label: "Dup groups", value: r.duplicateGroups.length },
+      { label: "Near-dups", value: r.nearDuplicates.length },
       { label: "Conflicts", value: r.conflictCount }
     ];
     for (const s of stats) {
@@ -283,6 +506,18 @@ var ReclaimReadinessView = class extends import_obsidian.ItemView {
         li.createEl("span", { text: g.files.slice(0, 3).join(", ") });
         if (g.files.length > 3)
           li.createEl("span", { text: ` +${g.files.length - 3} more` });
+      }
+    }
+    if (r.nearDuplicates.length > 0) {
+      container.createEl("h3", { text: `Near duplicates (${r.nearDuplicates.length})` });
+      const list = container.createEl("ul");
+      for (const nd of r.nearDuplicates.slice(0, 15)) {
+        const li = list.createEl("li");
+        li.createEl("span", { text: `${nd.similarity}% \xB7 `, cls: "reclaim-dup-count" });
+        li.createEl("span", { text: `${nd.a} \u2194 ${nd.b}` });
+      }
+      if (r.nearDuplicates.length > 15) {
+        list.createEl("li", { text: `\u2026 and ${r.nearDuplicates.length - 15} more` });
       }
     }
   }
