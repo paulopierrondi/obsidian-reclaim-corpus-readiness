@@ -1,7 +1,7 @@
 {
 	"id": "reclaim-corpus-readiness",
 	"name": "RECLAIM Corpus Readiness",
-	"version": "0.2.1",
+	"version": "0.2.2",
 	"minAppVersion": "0.15.0",
 	"description": "Score your Obsidian vault for AI/RAG readiness. Detect duplicates, missing frontmatter, and conflicts — on-device.",
 	"author": "Paulo Pierrondi",
