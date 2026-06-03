@@ -31,6 +31,62 @@
 	background: var(--background-modifier-form-field);
 }
 
+/* Dimension breakdown bars */
+.reclaim-dimensions {
+	margin-bottom: 20px;
+}
+
+.reclaim-dimension-row {
+	display: flex;
+	align-items: center;
+	gap: 10px;
+	margin-bottom: 8px;
+}
+
+.reclaim-dimension-label {
+	width: 90px;
+	font-size: 11px;
+	text-transform: uppercase;
+	letter-spacing: 0.5px;
+	color: var(--text-muted);
+	flex-shrink: 0;
+}
+
+.reclaim-dimension-bar-wrap {
+	flex: 1;
+	height: 6px;
+	background: var(--background-modifier-form-field);
+	border-radius: 3px;
+	overflow: hidden;
+}
+
+.reclaim-dimension-bar {
+	height: 100%;
+	border-radius: 3px;
+	transition: width 0.4s ease;
+}
+
+.reclaim-dimension-bar.good {
+	background: var(--text-success);
+}
+
+.reclaim-dimension-bar.warn {
+	background: var(--text-warning);
+}
+
+.reclaim-dimension-bar.bad {
+	background: var(--text-error);
+}
+
+.reclaim-dimension-value {
+	width: 32px;
+	text-align: right;
+	font-size: 12px;
+	font-weight: 600;
+	color: var(--text-normal);
+	flex-shrink: 0;
+}
+
 .reclaim-stats-grid {
 	display: grid;
 	grid-template-columns: repeat(4, 1fr);
