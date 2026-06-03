@@ -1,6 +1,6 @@
 {
   "name": "reclaim-corpus-readiness",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "RECLAIM Corpus Readiness plugin for Obsidian",
   "main": "main.js",
   "scripts": {
@@ -8,7 +8,13 @@
     "build": "tsc -noEmit -skipLibCheck && node esbuild.config.mjs production",
     "version": "node version-bump.mjs && git add manifest.json versions.json"
   },
-  "keywords": ["obsidian", "plugin", "rag", "corpus", "readiness"],
+  "keywords": [
+    "obsidian",
+    "plugin",
+    "rag",
+    "corpus",
+    "readiness"
+  ],
   "devDependencies": {
     "@types/node": "^16.11.6",
     "esbuild": "0.17.3",
